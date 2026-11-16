@@ -27,3 +27,11 @@ evidence/
 *.xlsx
 monitoring*.json
 candidates_*.csv
+
+# Private hybrid registry and manual prices: never publish or overwrite on update
+local_data/
+*.sqlite3
+*.sqlite3-*
+*.sqlite
+*.db
+work/

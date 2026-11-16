@@ -284,7 +284,7 @@ def is_product(store, path):
     return (('/product/' in path or '/products/' in path) if store != 'goldapple'
             else bool(re.match(r'^/\d{5,}', path)))
 
-def collect(browser,name,volume,access,config=None):
+def collect(browser,name,volume,access,config=None,registry=None):
     """One error never suppresses the remaining stores. Search misses are not stock claims."""
     from monitor_core import result,extract_card,scent_name,same_scent
     from browser_access import AccessError,protection
@@ -307,38 +307,57 @@ def collect(browser,name,volume,access,config=None):
                 full=(row.get('brand','')+' '+row.get('product','')).strip()
                 if row.get('store')==store and same_scent(full,name) and str(row.get('volume_ml'))==str(volume) and row.get('url'):
                     found.append((row['url'],full))
+            saved=registry.lookup(name,volume,store) if registry else None
+            if saved:found=[(saved['url'],saved['name'])]+[x for x in found if x[0]!=saved['url']]
             query=scent_name(name)
-            if not found:
+            def search_links():
+                errors.clear()
                 if store=='goldapple':anchors=search_goldapple(page,query,errors)
                 else:
                     page.goto(base+quote(query),wait_until='domcontentloaded',timeout=45000)
                     page.wait_for_timeout(1200)
                     if errors:raise errors[0]
                     anchors=page.locator('a[href]').evaluate_all("els=>els.map(a=>({url:a.href,text:a.innerText||''}))")
+                candidates=[]
                 for item in anchors:
                     parsed=urlparse(item['url']);candidate=item['text']+' '+parsed.path.replace('-',' ')
-                    # Discovery is permissive; the primary card is strictly revalidated later.
                     wanted=scent_name(name).split()
                     if parsed.scheme=='https' and parsed.hostname in (host,'www.'+host) and is_product(store,parsed.path) and all(t in normalized_words(candidate) for t in wanted):
-                        if item['url'] not in {x[0] for x in found}:found.append((item['url'],item['text']))
-            if not found:output.append(result(store,name,volume,reason='Поиск не дал проверяемой карточки; отсутствие товара не установлено'));continue
+                        if item['url'] not in {x[0] for x in candidates}:candidates.append((item['url'],item['text']))
+                return candidates
+            searched=not bool(found)
+            if searched:found=search_links()
             checked=[]
-            for url,label in found[:3]:
-                parsed=urlparse(url)
-                if parsed.scheme!='https' or parsed.hostname not in (DOMAINS[store],'www.'+DOMAINS[store]):continue
-                try:
-                    page.goto(url,wait_until='domcontentloaded',timeout=45000)
+            def check_links(candidates):
+                for url,label in candidates[:3]:
+                    parsed=urlparse(url)
+                    if parsed.scheme!='https' or parsed.hostname not in (DOMAINS[store],'www.'+DOMAINS[store]):continue
+                    errors.clear()
+                    try:
+                        page.goto(url,wait_until='domcontentloaded',timeout=45000)
+                        if errors:raise errors[0]
+                        page.wait_for_timeout(1000)
+                        why=protection(page.content())
+                        if why:raise AccessError('blocked',why)
+                        checked.append(extract_card(page.content(),page.url,store,name,volume))
+                    except AccessError as exc:
+                        if exc.status=='unavailable' and any(code in str(exc) for code in ('HTTP 404','HTTP 410')):
+                            checked.append(result(store,name,volume,url=url,reason=str(exc)));errors.clear();continue
+                        raise
+                    except Exception as exc:
+                        if errors:raise errors[0]
+                        checked.append(result(store,name,volume,url=url,reason='Ошибка карточки: '+type(exc).__name__))
                     if errors:raise errors[0]
-                    page.wait_for_timeout(1000)
-                    why=protection(page.content())
-                    if why:raise AccessError('blocked',why)
-                    checked.append(extract_card(page.content(),page.url,store,name,volume))
-                except AccessError:raise
-                except Exception as exc:
-                    checked.append(result(store,name,volume,url=url,reason='Ошибка карточки: '+type(exc).__name__))
-                if errors:raise errors[0]
+            check_links(found)
+            if not any(r['confirmed'] for r in checked) and not searched:
+                extra=search_links()
+                extra=[x for x in extra if x[0] not in {a[0] for a in found}]
+                check_links(extra)
+            if not checked:checked=[result(store,name,volume,reason='Поиск не дал проверяемой карточки; отсутствие товара не установлено')]
             good=[r for r in checked if r['confirmed']]
-            output.append(min(good,key=lambda r:r['price_rub']) if good else (checked[0] if checked else result(store,name,volume,reason='Ссылки не прошли проверку домена')))
+            selected=min(good,key=lambda r:r['price_rub']) if good else checked[0]
+            if registry:registry.record_automatic(name,volume,selected)
+            output.append(selected)
         except Exception as exc:
             error=errors[0] if errors else exc
             output.append(result(store,name,volume,url=found[0][0] if found else '',status=getattr(error,'status','unavailable'),reason=str(error)[:500] or type(error).__name__))
@@ -364,7 +383,7 @@ def launch_browser(p,headless=False,executable=None):
 def write_candidates(path,output):
     from monitor_core import result
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    fields=list(result('','','').keys())
+    fields=list(dict.fromkeys(list(result('','','').keys())+[key for row in output for key in row]))
     with path.open('w',encoding='utf-8-sig',newline='') as f:
         writer=csv.DictWriter(f,fieldnames=fields);writer.writeheader();writer.writerows(output)
     wb=Workbook();ws=wb.active;ws.title='Кандидаты';ws.append(fields)
@@ -380,17 +399,20 @@ def main():
     ap.add_argument('--headless',action='store_true');ap.add_argument('--browser-executable');ap.add_argument('--verified-transport',action='store_true',help='TLS-проверяемый requests для ограниченного облачного отображения')
     a=ap.parse_args()
     if not a.name.strip() or a.volume<=0:ap.error('Нужны название и положительный объём')
+    from hybrid_store import Registry,hybrid_prices
+    registry=Registry();registry.bootstrap(Path(__file__).resolve().parent)
     access=PublicAccess(Path(a.output).parent/'http_diagnostics',verified_transport=a.verified_transport)
     cfgpath=Path(__file__).resolve().parent/'store_policies.json'
     cfg=json.loads(cfgpath.read_text(encoding='utf-8')) if cfgpath.exists() else {}
     try:
         with sync_playwright() as p:
             browser=launch_browser(p,a.headless,a.browser_executable)
-            try:rows=collect(browser,a.name,a.volume,access,cfg)
+            try:rows=collect(browser,a.name,a.volume,access,cfg,registry)
             finally:browser.close()
     except Exception as exc:
         from monitor_core import result
         rows=[result(store,a.name,a.volume,reason='Браузер недоступен: '+type(exc).__name__) for store in DOMAINS]
+    rows=hybrid_prices(a.name,a.volume,rows,registry)
     write_candidates(a.output,rows)
     for r in rows:print(r['store'],r['status'],r['price_rub'],r['reason'],flush=True)
 

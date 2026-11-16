@@ -60,6 +60,8 @@ def main():
         if store=='delice opt':
             purchase=price if str(row[3] or '')=='ok' else None; supplier_url=str(row[2] or '');supplier_status=str(row[3] or '')
         elif store in ('randewoo','letu','goldapple','rivegauche') and str(row[3] or '')=='ok' and price is not None and price>0:
+            from hybrid_store import manual_snapshot_current
+            if not manual_snapshot_current(row[6] if len(row)>6 else None,row[7] if len(row)>7 else None,row[8] if len(row)>8 else None):continue
             competitors.append((store,price,str(row[3] or ''),str(row[2] or '')))
     if purchase is None or purchase<=0: ap.error('Нет подтверждаемой закупочной цены в отчёте')
     competitor_min=min((x[1] for x in competitors),default=None)

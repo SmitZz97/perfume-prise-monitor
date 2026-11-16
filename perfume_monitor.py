@@ -52,7 +52,7 @@ class App:
         ttk.Label(form, text='Аромат').grid(row=0,column=0,sticky='w')
         self.name = ttk.Entry(form, width=60)
         self.name.grid(row=1,column=0,sticky='ew',padx=(0,12))
-        self.name.insert(0, 'Creed Green Irish Tweed')
+        self.name.insert(0, 'Creed Green Irish Tweed EDP')
         ttk.Label(form, text='Объём, мл').grid(row=0,column=1,sticky='w')
         self.volume = ttk.Entry(form,width=12)
         self.volume.grid(row=1,column=1)
@@ -74,6 +74,9 @@ class App:
         batch_bar.pack(fill='x',pady=(0,8))
         self.batch_button=ttk.Button(batch_bar,text='МАССОВЫЙ МОНИТОРИНГ ИЗ EXCEL',command=self.start_batch)
         self.batch_button.pack(side='left')
+        ttk.Button(batch_bar,text='Подтвердить цены',command=self.confirm_prices).pack(side='left',padx=8)
+        self.manual_only=tk.BooleanVar(value=False)
+        ttk.Checkbutton(batch_bar,text='Без автосбора конкурентов (для массового запуска)',variable=self.manual_only).pack(side='left')
         supplier_frame=ttk.Frame(frame)
         supplier_frame.pack(fill='x',pady=(0,10))
         ttk.Label(supplier_frame,text='Ссылка Delice Opt (необязательно):').pack(side='left')
@@ -99,6 +102,10 @@ class App:
         self.logbox=tk.Text(frame,height=12,wrap='word')
         self.logbox.pack(fill='both',expand=True)
         self.log('Готово. Введите аромат и нажмите «Найти цены выбранного аромата».')
+
+    def confirm_prices(self):
+        from hybrid_ui import open_confirmation_window
+        open_confirmation_window(self.root,self.name.get().strip(),self.volume.get().strip())
 
     def log(self, text):
         self.root.after(0,lambda t=text:(self.logbox.insert('end',t+'\n'),self.logbox.see('end')))
@@ -263,6 +270,7 @@ class App:
             '--shipping',str(values['shipping']),'--other',str(values['other']),
             '--commission-pct',str(values['commission']),'--tax-pct',str(values['tax']),
             '--undercut',str(values['undercut'])]
+        if self.manual_only.get():cmd.append('--offline')
         self.batch_button.config(state='disabled')
         self.log('МАССОВЫЙ МОНИТОРИНГ: '+path)
         self.log('Итоговый файл: '+str(report))

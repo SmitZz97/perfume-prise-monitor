@@ -245,12 +245,28 @@ def main():
         if store not in ('randewoo','letu','rivegauche','goldapple'): continue
         price=parse_money(r.get('price_rub'))
         status=r.get('status','')
+        from hybrid_store import manual_snapshot_current
+        if r.get('source')=='manually':continue  # Re-read the persistent attestation below; CSV is not a new confirmation.
+        if not manual_snapshot_current(r.get('source'),r.get('checked_at'),r.get('expires_at')):continue
         if not price or status!='ok' or any(str(r.get(k,'')).lower()!='true' for k in ('confirmed','identity_verified','volume_verified','concentration_verified')):continue
         if not same_query(r.get('query',''),a.name) or str(r.get('volume_ml',''))!=str(a.volume):continue
         if store not in retailers or price<retailers[store][0]: retailers[store]=(price,r)
+    # The standalone comparison button must see the same fresh manual attestations as batch.
+    from hybrid_store import Registry,hybrid_prices
+    from monitor_core import result as make_result,STORES
+    registry=Registry(ROOT/'local_data/competitors.sqlite3');registry.bootstrap(ROOT)
+    automatic=[]
+    for store in STORES:
+        if store in retailers:
+            price,row=retailers[store]
+            entry={**row,'store':store,'price_rub':price,'confirmed':True,'identity_verified':True,'volume_verified':True,'concentration_verified':True}
+        else:entry=make_result(store,a.name,a.volume,reason='Автоматическая цена в свежем сравнении не подтверждена')
+        automatic.append(entry)
+    for entry in hybrid_prices(a.name,a.volume,automatic,registry):
+        if entry.get('confirmed') and entry.get('source')=='manually':retailers[entry['store']]=(entry['price_rub'],entry)
     wb=Workbook();ws=wb.active;ws.title='Сравнение'
     ws.append(['Аромат',a.name]);ws.append(['Объём, мл',a.volume]);ws.append(['Дата формирования',datetime.now()]);ws.append(['Источник закупки',source]);ws.append(['Источник конкурентов',candidates_source or 'Подходящий CSV не найден']);ws.append([])
-    ws.append(['Источник','Цена, ₽','URL','Статус','Разница, ₽','Наценка к закупке, %'])
+    ws.append(['Источник','Цена, ₽','URL','Статус','Разница, ₽','Наценка к закупке, %','Канал цены','Дата проверки','Действует до'])
     ws.append(['Delice Opt',best[0] if best else None,best[1]['url'] if best else supplier_url,'ok' if best else supplier_error or 'Точное название, концентрация, объём и однозначная цена закупки не подтверждены',None,None])
     for store in ('goldapple','letu','randewoo','rivegauche'):
         entry=retailers.get(store)
@@ -258,14 +274,14 @@ def main():
         r=entry[1] if entry else {}
         diff=price-best[0] if price is not None and best else None
         pct=round(diff/best[0]*100,1) if diff is not None else None
-        ws.append([store,price,r.get('url',''),r.get('status','') if entry else '; '.join(dict.fromkeys(x.get('status','') for x in rows if x.get('store')==store and x.get('status')))[:450] or 'Поиск не дал подтверждённой цены',diff,pct])
+        ws.append([store,price,r.get('url',''),r.get('status','') if entry else '; '.join(dict.fromkeys(x.get('status','') for x in rows if x.get('store')==store and x.get('status')))[:450] or 'Поиск не дал подтверждённой цены',diff,pct,r.get('source'),r.get('checked_at'),r.get('expires_at')])
     ws.append([]);ws.append(['Предложения поставщиков, подходящие по названию и объёму'])
     ws.append(['Поставщик','Цена, ₽','Название','Объём','URL'])
     for price,item in sorted(valid, key=lambda x: x[0]): ws.append([item['supplier'],price,item['title'],item['volume'],item['url']])
     diagnostic=wb.create_sheet('Проверка закупки')
-    diagnostic.append(['Запрос','Запрошенный объём','Название строки','Бренд строки','Объём строки','Концентрация строки','Совпало имя','Совпала концентрация','Совпал объём','Цена подтверждена','Причина отказа','URL'])
+    diagnostic.append(['Запрос','Запрошенный объём','Название строки','Бренд строки','Объём строки','Концентрация строки','Совпало имя','Совпала концентрация','Совпал объём','Цена подтверждена','Причина отказа','URL','Поставщик','Комплектация','Цена строки (не означает совпадение)'])
     for item,check in assessments:
-        diagnostic.append([a.name,a.volume,item.get('title',''),item.get('brand',''),check['observed_volume'],check['observed_concentration'],check['identity_verified'],check['concentration_verified'],check['volume_verified'],check['confirmed'],check['reason'],item.get('url','')])
+        diagnostic.append([a.name,a.volume,item.get('title',''),item.get('brand',''),check['observed_volume'],check['observed_concentration'],check['identity_verified'],check['concentration_verified'],check['volume_verified'],check['confirmed'],check['reason'],item.get('url',''),item.get('supplier',''),'обычный товар по названию' if plain_product(item.get('title','')) else 'тестер/набор/пробник/уценка',parse_money(item.get('price'))])
     if not assessments:diagnostic.append([a.name,a.volume,'','','','',False,False,False,False,supplier_error,supplier_url])
     diagnostic.freeze_panes='C2'
     ws.freeze_panes='A8'
