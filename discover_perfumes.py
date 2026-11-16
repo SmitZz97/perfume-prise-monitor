@@ -340,13 +340,13 @@ def collect(browser,name,volume,access,config=None,registry=None):
                         why=protection(page.content())
                         if why:raise AccessError('blocked',why)
                         checked.append(extract_card(page.content(),page.url,store,name,volume))
-                    except AccessError as exc:
-                        if exc.status=='unavailable' and any(code in str(exc) for code in ('HTTP 404','HTTP 410')):
-                            checked.append(result(store,name,volume,url=url,reason=str(exc)));errors.clear();continue
-                        raise
                     except Exception as exc:
-                        if errors:raise errors[0]
-                        checked.append(result(store,name,volume,url=url,reason='Ошибка карточки: '+type(exc).__name__))
+                        error=errors[0] if errors else exc
+                        if isinstance(error,AccessError):
+                            if error.status=='unavailable' and any(code in str(error) for code in ('HTTP 404','HTTP 410')):
+                                checked.append(result(store,name,volume,url=url,reason=str(error)));errors.clear();continue
+                            raise error
+                        checked.append(result(store,name,volume,url=url,reason='Ошибка карточки: '+type(error).__name__))
                     if errors:raise errors[0]
             check_links(found)
             if not any(r['confirmed'] for r in checked) and not searched:

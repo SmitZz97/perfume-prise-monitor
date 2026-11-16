@@ -17,12 +17,14 @@ def html():
 def setup(tmp_path,monkeypatch):
     registry=Registry(tmp_path/'registry.sqlite3');registry.save_link('Creed','Aventus','EDP',100,'goldapple',OLD)
     monkeypatch.setattr(discovery,'SEARCHES',{'goldapple':'https://goldapple.ru/'})
-    visits=[]
+    visits=[];errors=[]
     class Page:
         url=OLD
         mode='ok'
         def goto(self,url,**kw):
             visits.append(url);self.url=url
+            if url==OLD and self.mode=='aborted404':
+                errors.append(AccessError('unavailable','HTTP 404'));raise RuntimeError('Page.goto: net::ERR_FAILED')
             if url==OLD and self.mode in ('404','blocked'):raise AccessError('unavailable' if self.mode=='404' else 'blocked','HTTP '+('404' if self.mode=='404' else '403'))
         def content(self):return '<h1>unknown</h1>' if self.url==OLD and self.mode=='empty' else html()
         def wait_for_timeout(self,*a):pass
@@ -30,7 +32,7 @@ def setup(tmp_path,monkeypatch):
     class Context:
         def new_page(self):return page
         def close(self):pass
-    access=SimpleNamespace(context=lambda *_:(Context(),[]))
+    access=SimpleNamespace(context=lambda *_:(Context(),errors))
     def search(*_):visits.append('search');return [{'url':NEW,'text':'Creed Aventus'}]
     monkeypatch.setattr(discovery,'search_goldapple',search)
     return registry,page,access,visits
@@ -42,7 +44,7 @@ def test_saved_link_read_before_search_and_persisted(setup):
     assert row['confirmed'] and visits==[OLD]
     assert Registry(registry.path).lookup(NAME,100,'goldapple')['verification_status']=='automatic_identity_confirmed'
 
-@pytest.mark.parametrize('mode',['empty','404'])
+@pytest.mark.parametrize('mode',['empty','404','aborted404'])
 def test_failed_saved_card_falls_back_to_allowed_search(setup,mode):
     registry,page,access,visits=setup;page.mode=mode
     row=discovery.collect(None,NAME,100,access,registry=registry)[0]
