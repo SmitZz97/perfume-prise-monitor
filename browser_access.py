@@ -62,40 +62,68 @@ class PublicAccess:
                     self.origin(destination);robot_url=destination;continue
                 break
             else:raise AccessError('unavailable','Лимит редиректов robots.txt')
-            if r.status_code!=200 or r.headers.get('Content-Type','').split(';')[0].strip().lower()!='text/plain':raise AccessError('unavailable',f'robots.txt не подтверждён: HTTP {r.status_code}, {r.headers.get("Content-Type","")}')
-            self.rules[origin]=Protego.parse(r.text)
+            if r.status_code in (404,410):
+                self.events.append({'url':robot_url,'http_status':r.status_code,'robots':'absent; no directives (RFC 9309 §2.3.1.3)'})
+                self.rules[origin]=Protego.parse('')
+            elif r.status_code!=200 or r.headers.get('Content-Type','').split(';')[0].strip().lower()!='text/plain':raise AccessError('unavailable',f'robots.txt не подтверждён: HTTP {r.status_code}, {r.headers.get("Content-Type","")}')
+            else:self.rules[origin]=Protego.parse(r.text)
         rp=self.rules[origin]
         if not rp.can_fetch(url,self.agent):raise AccessError('blocked','Запрещено robots.txt: '+urlsplit(url).path)
         delay=max(1,float(rp.crawl_delay(self.agent) or 0));rate=rp.request_rate(self.agent)
         if rate:delay=max(delay,rate.seconds/rate.requests)
         if delay>30:raise AccessError('unavailable','robots.txt требует длительную паузу; запрос отложен')
         time.sleep(max(0,self.last.get(origin,0)+delay-time.monotonic()))
-    def context(self,browser,host,budget=45):
-        context=browser.new_context(locale='ru-RU',user_agent=self.session.headers['User-Agent'],service_workers='block')
-        deadline=time.monotonic()+budget;errors=[]
-        def route_handler(route):
-            req=route.request;u=urlsplit(req.url)
-            if time.monotonic()>deadline:errors.append(AccessError('unavailable','Лимит времени отображения карточки'));route.abort();return
+    def _record_route(self,request,**updates):
+        event={'url':request.url,'resource_type':getattr(request,'resource_type','unknown'),**updates}
+        self.events.append(event)
+        if self.folder:(self.folder/'requests.json').write_text(json.dumps(self.events,ensure_ascii=False,indent=2),encoding='utf-8')
+
+    def _handle_route(self,route,host,deadline,errors):
+        """Prepare a decision, then complete the route exactly once (including failures)."""
+        req=route.request;u=urlsplit(req.url)
+        document=getattr(req,'resource_type','document')=='document'
+        action='abort';kwargs={}
+        def record_error(error):
+            self._record_route(req,status=error.status,reason=str(error))
+            if document:errors.append(error)
+        try:
+            if time.monotonic()>deadline:
+                raise AccessError('unavailable','Лимит времени отображения карточки')
             if req.method!='GET' or not (u.hostname==host or (u.hostname or '').endswith('.'+host)):
-                self.events.append({'url':req.url,'skipped':'Внешний домен или запрос не GET; ресурс не запрошен'})
-                route.abort();return
-            try:
+                self._record_route(req,skipped='Внешний домен или запрос не GET; ресурс не запрошен')
+            else:
                 self.policy(req.url)
                 if self.verified_transport:
                     r=self.request(req.url)
-                    if r.status_code>=400:raise AccessError('unavailable','HTTP '+str(r.status_code))
-                    headers={k:v for k,v in r.headers.items() if k.lower() not in ('content-length','content-encoding','transfer-encoding','connection')}
-                    route.fulfill(status=r.status_code,headers=headers,body=r.content)
+                    if r.status_code>=400:raise AccessError('unavailable',f'HTTP {r.status_code}')
+                    kwargs={'status':r.status_code,'headers':{k:v for k,v in r.headers.items() if k.lower() not in ('content-length','content-encoding','transfer-encoding','connection')},'body':r.content}
                 else:
                     response=route.fetch(max_redirects=0,timeout=15000)
-                    text=response.text() if 'html' in response.headers.get('content-type','') else ''
+                    self._record_route(req,http_status=response.status,content_type=response.headers.get('content-type',''))
+                    text=response.text() if 'html' in response.headers.get('content-type','').lower() else ''
                     why=protection(text) if text else ''
                     if response.status in (401,403,429) or why:
                         error=AccessError('blocked',f'HTTP {response.status}: '+(why or 'Ограничение доступа'))
                         self.blocked[self.origin(req.url)]=error;raise error
                     if response.status>=400:raise AccessError('unavailable',f'HTTP {response.status}')
-                    route.fulfill(response=response)
-            except AccessError as e:errors.append(e);route.abort()
-            except Exception as exc:errors.append(AccessError('unavailable','Ошибка браузерного транспорта: '+type(exc).__name__+': '+str(exc)[:180]));route.abort()
-        context.route('**/*',route_handler)
+                    kwargs={'response':response}
+                action='fulfill'
+        except AccessError as exc:record_error(exc)
+        except Exception as exc:
+            # Fetch can race context/page closure. If it says handled, do not attempt another terminal operation.
+            record_error(AccessError('unavailable','Ошибка браузерного транспорта: '+type(exc).__name__+': '+str(exc)[:180]))
+            if 'already handled' in str(exc).lower() or 'has been closed' in str(exc).lower():return
+        # Terminal calls MUST remain outside the preparation try/except. A failed fulfill may already
+        # have completed the request; aborting from its exception handler caused the Windows regression.
+        try:
+            getattr(route,action)(**kwargs)
+        except Exception as exc:
+            self._record_route(req,completion_error=type(exc).__name__+': '+str(exc)[:180])
+            if document:errors.append(AccessError('unavailable','Не удалось завершить маршрут '+action+': '+str(exc)[:180]))
+            # No abort/continue/fulfill retry, even if completion itself raised.
+
+    def context(self,browser,host,budget=90):
+        context=browser.new_context(locale='ru-RU',user_agent=self.session.headers['User-Agent'],service_workers='block')
+        deadline=time.monotonic()+budget;errors=[]
+        context.route('**/*',lambda route:self._handle_route(route,host,deadline,errors))
         return context,errors

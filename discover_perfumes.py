@@ -167,37 +167,77 @@ def letu_price(page, name, volume, url):
     return (value, f'Цена варианта EDP {volume} мл; требуется сверка комплектации') if value else ('', 'Цена не распознана')
 
 
-def goldapple_search(page, name):
-    """Try opening the search UI, including a collapsed header search control."""
-    page.goto('https://goldapple.ru/', wait_until='domcontentloaded', timeout=35000)
-    page.wait_for_timeout(1300)
-    selectors = ('input[type="search"]:visible, input[placeholder*="Поиск"]:visible, '
-                 'input[placeholder*="поиск"]:visible, input[placeholder*="Найти"]:visible')
-    field = page.locator(selectors)
+SEARCH_INPUTS = ', '.join(x+':visible' for x in (
+    'input[type="search"]','input[role="searchbox"]',
+    'input[placeholder*="Поиск"]','input[placeholder*="поиск"]',
+    'input[placeholder*="Найти"]','input[placeholder*="найти"]',
+    'input[placeholder*="Search"]','input[placeholder*="search"]',
+    'input[name="q"]','input[name="query"]','input[name="search"]'))
+
+
+def search_goldapple(page,query,errors=None):
+    """Use visible live UI; never guess an endpoint or treat UI failure as no stock."""
+    from browser_access import AccessError,protection
+    errors=errors if errors is not None else []
+    def check():
+        if errors:raise errors[0]
+        why=protection(page.content())
+        if why:raise AccessError('blocked',why)
+    page.goto('https://goldapple.ru/',wait_until='domcontentloaded',timeout=45000)
+    check()
+    try:page.locator(SEARCH_INPUTS).first.wait_for(state='visible',timeout=3000)
+    except Exception:pass
+    check()
+    field=page.locator(SEARCH_INPUTS)
     if not field.count():
-        for selector in ('button[aria-label*="оиск"]', '[data-test-id*="search"]',
-                         'button:has(svg[class*="search"])', 'a[aria-label*="оиск"]'):
-            opener = page.locator(selector).first
+        openers=page.get_by_role('button',name=re.compile(r'поиск|search',re.I))
+        candidates=[openers.nth(i) for i in range(min(openers.count(),4))]
+        css=page.locator('button[data-test-id*="search"], button[data-testid*="search"], [role="button"][data-testid*="search"], button:has(svg[class*="search"]), [data-test-id="header-search"]')
+        candidates += [css.nth(i) for i in range(min(css.count(),4))]
+        for opener in candidates:
+            check()
             try:
-                if opener.count() and opener.is_visible():
-                    opener.click(timeout=2000)
-                    page.wait_for_timeout(400)
-                    if page.locator(selectors).count(): break
-            except Exception: pass
-    field = page.locator(selectors)
-    if not field.count(): return False, 'Поисковое поле не найдено даже после открытия панели'
-    try:
-        field.first.fill(name,timeout=4000)
-        page.wait_for_timeout(1000)
-        # Capture autocomplete product links before navigation (many shops use a popup).
-        suggestions = page.locator('a[href]').evaluate_all(
-            "els => els.map(a => ({url:a.href,text:(a.innerText||'').trim()}))")
-        goldapple_search.suggestions = suggestions
-        field.first.press('Enter',timeout=3000)
-        page.wait_for_timeout(1400)
-    except Exception as exc:
-        return False, f'Поиск не завершён: {type(exc).__name__}'
-    return True, ''
+                if not opener.is_visible():continue
+                opener.click(timeout=2500)
+                page.locator(SEARCH_INPUTS).first.wait_for(state='visible',timeout=2500)
+            except Exception:
+                check()
+            field=page.locator(SEARCH_INPUTS)
+            if field.count():break
+    if not field.count():
+        # Only follow a search link actually present on the current merchant page.
+        links=page.locator('header a[href*="search"], a[aria-label*="Поиск"][href], a[aria-label*="Search"][href]')
+        for i in range(min(links.count(),3)):
+            href=links.nth(i).get_attribute('href')
+            if not href:continue
+            from urllib.parse import urljoin
+            destination=urljoin(page.url,href);u=urlparse(destination)
+            if u.scheme!='https' or u.hostname not in ('goldapple.ru','www.goldapple.ru'):continue
+            page.goto(destination,wait_until='domcontentloaded',timeout=30000);check()
+            try:page.locator(SEARCH_INPUTS).first.wait_for(state='visible',timeout=3000)
+            except Exception:pass
+            field=page.locator(SEARCH_INPUTS)
+            if field.count():break
+    if not field.count():raise AccessError('unavailable','Не найден видимый поисковый интерфейс: проверены поля, кнопки и опубликованные ссылки; отсутствие товара не установлено')
+    field.first.fill(query,timeout=5000);check()
+    # React/Vue autocomplete may update before submitting and may have no GET form.
+    page.wait_for_timeout(700);check()
+    def links_now():return page.locator('a[href]').evaluate_all("els=>els.map(a=>({url:a.href,text:a.innerText||''}))")
+    suggestions=links_now()
+    try:field.first.press('Enter',timeout=4000);page.wait_for_timeout(900)
+    except Exception:
+        check()
+        if not any(is_product('goldapple',urlparse(x['url']).path) for x in suggestions):raise
+    check()
+    return suggestions+links_now()
+
+
+def goldapple_search(page,name):
+    # Backward-compatible entry point without stale suggestions from a previous perfume.
+    goldapple_search.suggestions=[]
+    try:goldapple_search.suggestions=search_goldapple(page,name)
+    except Exception as exc:return False,str(exc)
+    return True,''
 
 
 def goldapple_price(page, name, volume, url):
@@ -260,8 +300,6 @@ def collect(browser,name,volume,access,config=None):
         policy=config.get(store,{}).get('access_policy','guarded_public')
         if policy!='guarded_public':
             output.append(result(store,name,volume,status='blocked' if policy=='prohibited' else 'unavailable',reason='Условия сайта не разрешают текущий режим запроса'));continue
-        if store in access.store_failures:
-            output.append(result(store,name,volume,reason=access.store_failures[store]+'; повтор в этом цикле пропущен'));continue
         try:
             host=DOMAINS[store];context,errors=access.context(browser,host)
             page=context.new_page()
@@ -271,19 +309,12 @@ def collect(browser,name,volume,access,config=None):
                     found.append((row['url'],full))
             query=scent_name(name)
             if not found:
-                if store=='goldapple':
-                    page.goto('https://goldapple.ru/',wait_until='domcontentloaded',timeout=45000)
+                if store=='goldapple':anchors=search_goldapple(page,query,errors)
+                else:
+                    page.goto(base+quote(query),wait_until='domcontentloaded',timeout=45000)
+                    page.wait_for_timeout(1200)
                     if errors:raise errors[0]
-                    field=page.locator('input[type="search"], input[placeholder*="оиск"], input[placeholder*="айти"]')
-                    if not field.count():
-                        opener=page.locator('button[aria-label*="оиск"], [data-test-id*="search"]')
-                        if opener.count():opener.first.click(timeout=3000)
-                    if not field.count():raise AccessError('unavailable','Текущий интерфейс поиска Золотого Яблока не подтвердился')
-                    field.first.fill(query);field.first.press('Enter')
-                else:page.goto(base+quote(query),wait_until='domcontentloaded',timeout=45000)
-                page.wait_for_timeout(1200)
-                if errors:raise errors[0]
-                anchors=page.locator('a[href]').evaluate_all("els=>els.map(a=>({url:a.href,text:a.innerText||''}))")
+                    anchors=page.locator('a[href]').evaluate_all("els=>els.map(a=>({url:a.href,text:a.innerText||''}))")
                 for item in anchors:
                     parsed=urlparse(item['url']);candidate=item['text']+' '+parsed.path.replace('-',' ')
                     # Discovery is permissive; the primary card is strictly revalidated later.
@@ -310,7 +341,6 @@ def collect(browser,name,volume,access,config=None):
             output.append(min(good,key=lambda r:r['price_rub']) if good else (checked[0] if checked else result(store,name,volume,reason='Ссылки не прошли проверку домена')))
         except Exception as exc:
             error=errors[0] if errors else exc
-            if any(x in str(error) for x in ('Лимит времени','браузерного транспорта','интерфейс поиска')):access.store_failures[store]=str(error)[:400]
             output.append(result(store,name,volume,url=found[0][0] if found else '',status=getattr(error,'status','unavailable'),reason=str(error)[:500] or type(error).__name__))
         finally:
             if context:context.close()

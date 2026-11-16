@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from openpyxl import Workbook, load_workbook
 from playwright.sync_api import sync_playwright
-from monitor_core import same_scent, identity, scent_name, money as parse_money, concentration
+from monitor_core import same_scent, identity, scent_name, money as parse_money, concentration, plain_product, volume_values
 
 ROOT = Path(__file__).resolve().parent
 LINKS = ROOT / 'supplier_links.json'
@@ -42,9 +42,40 @@ def norm(s):
 def terms(s):
     return [t for t in norm(s).split() if len(t)>1 and t not in ('edp','eau','de','parfum','мл','ml')]
 
-def exact_item(title, query, volume, volume_text):
-    match,conc,vol=identity(title,'',str(volume_text),query,volume)
-    return match and conc and vol
+def normalize_supplier_label(text):
+    # Exact concentration aliases only; no fuzzy matching, no inferred concentration.
+    text=str(text)
+    for pattern,canonical in (
+        (r'(?<!\w)п\s*[./]\s*в\.?(?!\w)|парф\.\s*вода', ' EDP '),
+        (r'(?<!\w)т\s*[./]\s*в\.?(?!\w)|туал\.\s*вода', ' EDT '),
+    ):text=re.sub(pattern,canonical,text,flags=re.I)
+    return text
+
+
+def assess_offer(item,query,volume):
+    title=normalize_supplier_label(item.get('title',''));brand=str(item.get('brand','')).strip()
+    text=normalize_supplier_label(item.get('volume',''))
+    # Bare numbers become ml only when the offer's explicit unit/header says so.
+    if re.fullmatch(r'\d+(?:[.,]\d+)?',text.strip()) and norm(item.get('volume_unit','')) in ('ml','мл'):
+        text+=' ml'
+    match,conc,vol=identity(title,brand,text,query,volume)
+    standard=plain_product(title+' '+text)
+    price=parse_money(item.get('price'))
+    reasons=[]
+    if not match:reasons.append('Точное имя/бренд не совпадают или не подтверждены')
+    if not conc:reasons.append('Концентрация: требуется '+(concentration(query) or 'явная')+', получено '+(concentration(title+' '+text) or 'не подтверждена'))
+    if not vol:reasons.append('Объём: требуется '+str(volume)+' мл, получено '+(', '.join(str(x) for x in sorted(volume_values(title+' '+text))) or 'нет явного объёма с единицей'))
+    if not standard:reasons.append('Другая комплектация: тестер/набор/пробник')
+    if price is None:reasons.append(item.get('price_reason') or 'Однозначное поле цены не подтверждено')
+    return {'identity_verified':match,'concentration_verified':conc,'volume_verified':vol,
+            'confirmed':match and conc and vol and standard and price is not None,
+            'price':price,'reason':'; '.join(reasons),
+            'observed_concentration':concentration(title+' '+text),'observed_volume':text}
+
+
+def exact_item(title,query,volume,volume_text):
+    item=assess_offer({'title':title,'volume':volume_text,'price':1},query,volume)
+    return item['identity_verified'] and item['concentration_verified'] and item['volume_verified'] and plain_product(title+' '+str(volume_text))
 
 
 def money(text):
@@ -53,18 +84,61 @@ def money(text):
     return next(iter(amounts)) if len(amounts)==1 else None
 
 
-def row_price(card):
-    # Scope to this supplier offer; never select the last amount from its parent.
-    parent=card.locator('xpath=..')
-    scope=parent if parent.locator('[class*="product-detail-table__info"]').count()==1 else card
+def offer_scope(card):
+    # The closest container with exactly one offer info row, never the whole multi-offer table.
+    scope=card
+    for _ in range(3):
+        parent=scope.locator('xpath=..')
+        if not parent.count() or parent.locator('[class*="product-detail-table__info"]').count()!=1:break
+        scope=parent
+        if scope.locator('[class*="product-detail-table__price"], [data-testid="offer-price"]').count():break
+    return scope
+
+
+def column_header(node):
+    cell=node.locator('xpath=ancestor-or-self::td[1]')
+    if not cell.count():return ''
+    table=cell.locator('xpath=ancestor::table[1]')
+    if not table.count():return ''
+    index=cell.evaluate('el=>el.cellIndex')
+    headers=table.locator('thead tr').last.locator('th,td') if table.locator('thead tr').count() else None
+    if headers is None or headers.count()<=index:return ''
+    if any(x not in (None,'1') for x in headers.evaluate_all("els=>els.map(el=>el.getAttribute('colspan'))")):return ''
+    return headers.nth(index).inner_text()
+
+
+def row_price_details(card):
+    scope=offer_scope(card)
     nodes=scope.locator('[class*="product-detail-table__price"]:visible, [data-testid="offer-price"]:visible')
     values=[]
     for i in range(nodes.count()):
-        value=money(nodes.nth(i).inner_text(timeout=4000))
-        if value is not None:values.append(value)
-    if len(set(values))==1:return values[0]
-    if values:return None
-    return None  # No explicit offer-price field: refuse unrelated amounts in surrounding text.
+        node=nodes.nth(i)
+        if node.evaluate("el=>!!el.closest('del,s,[data-old-price]')"):continue
+        raw=node.inner_text(timeout=4000).strip();value=money(raw)
+        if value is None and re.fullmatch(r'[\d\s\u00a0\u202f]+(?:[.,]\d{1,2})?',raw):
+            # A currency-free scalar is only accepted with currency proof in the same field/column.
+            currency=node.get_attribute('data-currency') or ''
+            header=column_header(node)
+            if currency=='RUB' or re.search(r'₽|руб',header,re.I):value=parse_money(raw)
+        if value is None:return None,'Поле цены отсутствует/содержит несколько сумм или валюта не подтверждена'
+        values.append(value)
+    unique=set(values)
+    if len(unique)==1:return values[0],''
+    return None,('Явное поле цены в строке предложения не найдено' if not values else 'В строке несколько разных цен')
+
+
+def row_price(card):return row_price_details(card)[0]
+
+
+def explicit_volume_unit(card):
+    node=offer_scope(card).locator('[class*="product-detail-table__volume"]').first
+    if not node.count():return ''
+    for attr in ('data-unit','data-volume-unit'):
+        unit=node.get_attribute(attr)
+        if norm(unit or '') in ('ml','мл'):return unit
+    header=column_header(node)
+    if re.search(r'(объ[её]м|volume).*?(мл|ml)',header,re.I):return 'ml'
+    return ''
 
 
 def read_live(url):
@@ -79,14 +153,17 @@ def read_live(url):
             page.wait_for_timeout(1800)
             cards=page.locator('[class*="product-detail-table__info"]')
             for i in range(cards.count()):
-                card=cards.nth(i)
+                card=cards.nth(i);scope=offer_scope(card)
                 def part(selector):
-                    el=card.locator(selector)
+                    el=scope.locator(selector)
                     return el.first.inner_text(timeout=5000).strip() if el.count() else ''
+                price,price_reason=row_price_details(card)
                 result.append({'supplier':part('[class*="product-detail-table__supplier"]'),
                     'title':part('[class*="product-detail-table__title"]'),
+                    'brand':part('[class*="product-detail-table__brand"]'),
+                    'volume_unit':explicit_volume_unit(card),
                     'volume':part('[class*="product-detail-table__volume"]'),
-                    'price':row_price(card),'url':url})
+                    'price':price,'price_reason':price_reason,'url':url})
         finally: context.close()
     return result
 
@@ -141,13 +218,13 @@ def main():
     else:
         supplier_error='Нет сохранённой ссылки поставщика; сохранённые ранее цены не считаются текущей закупкой'
         source=supplier_error
-    valid=[]
+    valid=[];assessments=[]
     for item in offers:
-        if not exact_item(item['title'],a.name,a.volume,item['volume']): continue
-        try: price=parse_money(item['price'])
-        
-        except (TypeError,ValueError): continue
-        if price is not None and price>0: valid.append((price,item))
+        check=assess_offer(item,a.name,a.volume);assessments.append((item,check))
+        if check['confirmed']:valid.append((check['price'],item))
+    if offers and not valid and not supplier_error:
+        supplier_error=' | '.join(dict.fromkeys(check['reason'] for _,check in assessments if check['reason']))[:1500]
+    if not offers and not supplier_error:supplier_error='Карточка открыта, но строки предложений поставщиков не найдены'
     best=min(valid,key=lambda x:x[0]) if valid else None
     print("ПРОВЕРКА СОХРАНЕНИЯ:", "Закупка найдена =", bool(best), "Ссылка =", repr(supplier_url))
     if best and a.supplier_url:
@@ -185,6 +262,12 @@ def main():
     ws.append([]);ws.append(['Предложения поставщиков, подходящие по названию и объёму'])
     ws.append(['Поставщик','Цена, ₽','Название','Объём','URL'])
     for price,item in sorted(valid, key=lambda x: x[0]): ws.append([item['supplier'],price,item['title'],item['volume'],item['url']])
+    diagnostic=wb.create_sheet('Проверка закупки')
+    diagnostic.append(['Запрос','Запрошенный объём','Название строки','Бренд строки','Объём строки','Концентрация строки','Совпало имя','Совпала концентрация','Совпал объём','Цена подтверждена','Причина отказа','URL'])
+    for item,check in assessments:
+        diagnostic.append([a.name,a.volume,item.get('title',''),item.get('brand',''),check['observed_volume'],check['observed_concentration'],check['identity_verified'],check['concentration_verified'],check['volume_verified'],check['confirmed'],check['reason'],item.get('url','')])
+    if not assessments:diagnostic.append([a.name,a.volume,'','','','',False,False,False,False,supplier_error,supplier_url])
+    diagnostic.freeze_panes='C2'
     ws.freeze_panes='A8'
     for col,width in {'A':30,'B':22,'C':72,'D':55,'E':22,'F':27}.items():ws.column_dimensions[col].width=width
     for row in ws.iter_rows():
