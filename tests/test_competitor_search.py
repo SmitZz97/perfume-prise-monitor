@@ -43,7 +43,7 @@ class FixtureAccess:
         return context, []
 
 
-@pytest.mark.parametrize("source", STORES)
+@pytest.mark.parametrize("source", [source for source in STORES if source != "randewoo"])
 def test_search_finds_exact_card_with_empty_urls_and_prefers_cache(source, browser):
     domain = STORES[source]
     prefix = "/123456-" if source == "goldapple" else "/product/"
@@ -137,8 +137,9 @@ def test_cli_link_cache_is_separate_from_manual_confirmations(tmp_path, monkeypa
     before = manual.read_bytes()
     access = FixtureAccess({url: document()})
     access.session = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr(competitors, "PublicAccess", lambda **_: access)
+    monkeypatch.setattr(competitors, "CompetitorAccess", lambda **_: access)
     monkeypatch.setattr(competitors, "sync_playwright", lambda: playwright_fixture())
+    monkeypatch.setattr(competitors, "rendered_card", lambda *_: (None, False, "", "Нет цены"))
     monkeypatch.setattr(competitors, "search_links", lambda browser, transport, source, product:
                         [url] if source == "goldapple" else [])
     monkeypatch.setattr("sys.argv", ["competitors", "--catalog", str(catalog), "--output", str(output),

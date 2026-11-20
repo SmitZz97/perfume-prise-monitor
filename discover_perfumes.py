@@ -172,7 +172,9 @@ SEARCH_INPUTS = ', '.join(x+':visible' for x in (
     'input[placeholder*="Поиск"]','input[placeholder*="поиск"]',
     'input[placeholder*="Найти"]','input[placeholder*="найти"]',
     'input[placeholder*="Search"]','input[placeholder*="search"]',
-    'input[name="q"]','input[name="query"]','input[name="search"]'))
+    'input[name="q"]','input[name="query"]','input[name="search"]',
+    'header input[aria-label*="оиск"]','header input[aria-label*="айти"]',
+    'header input[data-testid*="search"]','header input[data-test-id*="search"]'))
 
 
 def search_goldapple(page,query,errors=None):
@@ -185,14 +187,15 @@ def search_goldapple(page,query,errors=None):
         if why:raise AccessError('blocked',why)
     page.goto('https://goldapple.ru/',wait_until='domcontentloaded',timeout=45000)
     check()
-    try:page.locator(SEARCH_INPUTS).first.wait_for(state='visible',timeout=3000)
+    entry = page.locator(SEARCH_INPUTS).or_(page.get_by_role('button',name=re.compile(r'поиск|найти|search',re.I)))
+    try:entry.first.wait_for(state='visible',timeout=5500)
     except Exception:pass
     check()
     field=page.locator(SEARCH_INPUTS)
     if not field.count():
-        openers=page.get_by_role('button',name=re.compile(r'поиск|search',re.I))
+        openers=page.get_by_role('button',name=re.compile(r'поиск|найти|search',re.I))
         candidates=[openers.nth(i) for i in range(min(openers.count(),4))]
-        css=page.locator('button[data-test-id*="search"], button[data-testid*="search"], [role="button"][data-testid*="search"], button:has(svg[class*="search"]), [data-test-id="header-search"]')
+        css=page.locator('button[data-test-id*="search"], button[data-testid*="search"], [role="button"][data-testid*="search"], button:has(svg[class*="search"]), [data-test-id="header-search"], header [aria-controls*="search"], header [title*="Поиск"]')
         candidates += [css.nth(i) for i in range(min(css.count(),4))]
         for opener in candidates:
             check()

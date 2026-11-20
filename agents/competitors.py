@@ -17,6 +17,7 @@ from browser_access import AccessError, PublicAccess, protection
 from discover_perfumes import SEARCHES, is_product, search_goldapple
 from monitor_core import CONCENTRATIONS, concentrations, extract_card, norm, scent_name, volume_values
 
+from . import competitor_dom
 from .exchange import Product, STORES, check_url, confirmations, load, normalized, number, observation, save, stock, targets
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,9 +36,39 @@ PACKAGE = {
 PACKAGE_QUERY = {"tester": "тестер", "set": "набор", "sample": "пробник", "refill": "refill"}
 
 
+def guard_randewoo_search(url):
+    parts = urlsplit(url)
+    if (parts.hostname in {"randewoo.ru", "www.randewoo.ru"}
+            and unquote(parts.path).rstrip("/").casefold() == "/search"):
+        raise AccessError("blocked", "Randewoo: /search отключён; используйте прямую карточку")
+
+
+class CompetitorAccess(PublicAccess):
+    def policy(self, url):
+        guard_randewoo_search(url)
+        super().policy(url)
+
+    def request(self, url):
+        host = urlsplit(url).hostname or ""
+        for domain in STORES.values():
+            if host == domain or host.endswith("." + domain):
+                for origin, error in self.blocked.items():
+                    blocked_host = urlsplit(origin).hostname or ""
+                    if blocked_host == domain or blocked_host.endswith("." + domain):
+                        raise error
+                break
+        response = super().request(url)
+        if response.status_code == 503:
+            error = AccessError("blocked", "HTTP 503: магазин временно недоступен; повторные запросы остановлены")
+            self.blocked[self.origin(url)] = error
+            raise error
+        return response
+
+
 def fetch_card(access, source, url):
     seen = set()
     for _ in range(5):
+        guard_randewoo_search(url)
         check_url(source, url)
         if url in seen:
             break
@@ -62,26 +93,28 @@ def search_query(product):
 
 
 def search_links(browser, access, source, product):
+    if source == "randewoo":
+        raise AccessError("no_card", "Randewoo: используйте разрешённую прямую ссылку; поиск /search отключён")
     domain = STORES[source]
     # The existing context guards every network request, including API calls and redirects.
-    context, errors = access.context(browser, domain, budget=40)
+    context, errors = access.context(browser, domain, budget=65)
     try:
         context.route_web_socket("**/*", lambda socket: socket.close())
         page = context.new_page()
         query = search_query(product)
         try:
-            if source == "goldapple":
-                links = search_goldapple(page, query, errors)
-            else:
-                response = page.goto(SEARCHES[source] + quote(query), wait_until="domcontentloaded", timeout=20000)
-                if errors:
-                    raise errors[0]
-                if response is None or response.status >= 400 or not urlsplit(page.url).path.startswith("/search"):
-                    raise AccessError("unavailable", "Страница поиска недоступна")
-                page.wait_for_timeout(1200)
-                links = page.locator("a[href]").evaluate_all(
-                    "els=>els.map(a=>({url:a.href,text:a.innerText||''}))"
-                )
+            def run(query):
+                if source == "goldapple":
+                    return search_goldapple(page, query, errors)
+                return catalogue_search(page, source, query, errors)
+
+            links = run(query)
+            words = set(scent_name(product.name).split())
+            if not blocked_store(access, source) and not any(
+                words <= set(norm(link["text"] + " " + unquote(urlsplit(link["url"]).path)).split())
+                for link in links
+            ):
+                links += run(f"{product.brand} {product.name}")
             if errors:
                 raise errors[0]
             if blocked_store(access, source):
@@ -117,6 +150,55 @@ def search_links(browser, access, source, product):
         context.close()
 
 
+def catalogue_search(page, source, query, errors):
+    destination = SEARCHES[source] + quote(query)
+    response = page.goto(destination, wait_until="commit", timeout=20000)
+    if errors:
+        raise errors[0]
+    if response is None or response.status >= 400 or not urlsplit(page.url).path.startswith("/search"):
+        raise AccessError("unavailable", "Страница поиска недоступна или перенаправлена")
+    results = page.locator('main a[href*="/product/"]:visible, main a[href*="/products/"]:visible, '
+                           'a[href*="/product/"]:visible, a[href*="/products/"]:visible')
+    empty = page.get_by_text(re.compile(r"ничего не найдено|товары не найдены|нет результатов", re.I))
+    try:
+        results.or_(empty).first.wait_for(state="visible", timeout=8500)
+    except Error:
+        if errors:
+            raise errors[0]
+        # A partially loaded page may still expose public links, even if styles or images failed.
+    return results.evaluate_all("els=>els.map(a=>({url:a.href,text:a.innerText||''}))")
+
+
+def rendered_card(browser, access, product, source, url):
+    context, errors = access.context(browser, STORES[source], budget=55)
+    try:
+        context.route_web_socket("**/*", lambda socket: socket.close())
+        page = context.new_page()
+
+        def check():
+            competitor_dom.check_page(page, errors, lambda: blocked_store(access, source))
+
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            check()
+            check_url(source, page.url)
+            if not current_offer_dates(page.content()):
+                return None, False, "", "Срок действия предложения истёк или указан некорректно"
+            result = competitor_dom.offer(page, product, source, title_name=product_name,
+                                          package_patterns=PACKAGE, cologne=COLOGNE, check=check)
+            if result[0] and not current_offer_dates(page.content()):
+                return None, result[1], result[2], "Срок действия цены выбранного варианта истёк или указан некорректно"
+            return result
+        except Error:
+            if errors:
+                raise errors[0]
+            return None, False, "", "Chromium не дождался основного блока карточки или выбранного варианта"
+        except ValueError:
+            return None, False, "", "Карточка перенаправлена на другой домен или неподтверждённый URL"
+    finally:
+        context.close()
+
+
 def product_objects(html):
     def walk(value):
         if isinstance(value, list):
@@ -137,12 +219,22 @@ def product_objects(html):
 
 
 def product_name(title, brand):
+    title = re.sub(
+        r"\b(?:женская|мужская|унисекс)\s+(?=(?:парфюмерная|парфюмированная|туалетная)\s+вода)",
+        "", title, flags=re.I,
+    )
+    title = re.sub(r"\s*,?\s*для\s+(?:женщин|мужчин)\s*$", "", title, flags=re.I)
     for _, pattern in CONCENTRATIONS:
         title = re.sub(pattern, " ", title, flags=re.I)
     for pattern in (COLOGNE, VOLUME, *PACKAGE.values()):
         title = re.sub(pattern, " ", title, flags=re.I)
     title = normalized(title).strip(" ,–—")
-    return title.removeprefix(normalized(brand) + " ").strip(" ,–—")
+    title = title.removeprefix(normalized(brand) + " ")
+    parts = normalized(brand).split()
+    if len(parts) >= 3:
+        initials = "".join(part[0] for part in parts)
+        title = title.removeprefix(initials + " ")
+    return title.strip(" ,–—")
 
 
 def identity(product, html, url):
@@ -230,7 +322,7 @@ def current_offer_dates(html):
     return True
 
 
-def inspect(product, source, url, access, *, saved):
+def inspect(product, source, url, access, *, saved, render=None):
     try:
         final_url, html = fetch_card(access, source, url)
     except AccessError as exc:
@@ -239,19 +331,43 @@ def inspect(product, source, url, access, *, saved):
         return observation(product, source, "unavailable", url=url,
                            reason="Редирект вышел за пределы разрешённого URL"), False
     verdict, title = identity(product, html, final_url)
-    if verdict == "mismatch" or (verdict == "unverified" and not saved):
+    if verdict == "mismatch" and not render:
         return observation(product, source, "no_card", url=final_url,
-                           reason="Точное соответствие карточки не установлено"), False
-    if (verdict == "exact" and product.package == "retail" and not product.configuration
-            and current_offer_dates(html)):
+                           reason="Карточка относится к другому товару или варианту"), False
+    fresh = current_offer_dates(html)
+    reason = "Бренд, название, концентрация, объём или комплектация не подтверждены в исходном HTML"
+    if not fresh:
+        reason = "Срок действия предложения истёк или указан некорректно"
+    elif verdict == "exact" and product.package == "retail" and not product.configuration:
         query = f"{product.brand} {product.name} {product.concentration}"
         card = extract_card(html, final_url, source, query, product.volume_ml)
         if (card["confirmed"] and card["price_source"] == "Product/Offer JSON-LD"
                 and card["third_party"] is False):
             return observation(product, source, "confirmed", url=final_url, price=card["price_rub"],
-                               stock=stock(card["availability"]), variant=title, evidence="automatic"), True
+                               stock=stock(card["availability"]), variant=title, evidence="automatic",
+                               reason="Публичная цена точного варианта из Product/Offer JSON-LD"), True
+        reason = card["reason"] or "В структурированных данных нет однозначной цены продавца магазина"
+    same_base = any(
+        product_name(str(item.get("name", "")), product.brand) == normalized(product.name)
+        for item in product_objects(html)
+    )
+    if render and fresh and (verdict != "mismatch" or same_base):
+        try:
+            quote, exact, variant, detail = render(product, source, final_url)
+        except AccessError as exc:
+            return observation(product, source, exc.status, url=final_url, reason=str(exc)), False
+        if quote:
+            price, availability = quote
+            return observation(product, source, "confirmed", url=final_url, price=price, stock=availability,
+                               variant=variant, evidence="automatic", reason=detail), True
+        if (verdict == "mismatch" and not exact) or (verdict == "unverified" and not saved and not variant):
+            return observation(product, source, "no_card", url=final_url, reason=detail), False
+        return observation(product, source, "manual_review", url=final_url, variant=variant or title,
+                           reason=detail), exact or verdict == "exact"
+    if verdict == "mismatch" or (verdict == "unverified" and not saved):
+        return observation(product, source, "no_card", url=final_url, reason=reason), False
     return observation(product, source, "manual_review", url=final_url, variant=title,
-                       reason="Проверьте точный вариант, продавца и публичную цену"), verdict == "exact"
+                       reason=reason), verdict == "exact"
 
 
 def blocked_store(access, source):
@@ -260,9 +376,12 @@ def blocked_store(access, source):
     return any(host == domain or host.endswith("." + domain) for host in hosts)
 
 
-def collect(product, source, url, access, policy, *, saved_url=None, search=None, remember=None):
+def collect(product, source, url, access, policy, *, saved_url=None, search=None, remember=None, render=None):
     if policy != "guarded_public":
         return observation(product, source, "blocked", url=url or "", reason="Автоматический доступ отключён политикой")
+    if blocked_store(access, source):
+        return observation(product, source, "blocked", url=saved_url or url or "",
+                           reason="Доступ остановлен после ограничения магазина; проверьте карточку вручную")
     checked = set()
     review = None
     failure = None
@@ -271,7 +390,7 @@ def collect(product, source, url, access, policy, *, saved_url=None, search=None
         nonlocal review, failure
         check_url(source, link)
         checked.add(link)
-        row, exact = inspect(product, source, link, access, saved=saved)
+        row, exact = inspect(product, source, link, access, saved=saved, render=render)
         if exact or row["status"] == "confirmed":
             if remember:
                 remember(row["url"])
@@ -289,7 +408,7 @@ def collect(product, source, url, access, policy, *, saved_url=None, search=None
         result = attempt(link, saved=True)
         if result:
             return result
-    if search and not blocked_store(access, source):
+    if search and source != "randewoo" and not blocked_store(access, source):
         try:
             links = search(source, product)
         except AccessError as exc:
@@ -300,7 +419,9 @@ def collect(product, source, url, access, policy, *, saved_url=None, search=None
                     result = attempt(link, saved=False)
                     if result:
                         return result
-    return review or failure or observation(product, source, "no_card", reason="Точная карточка не найдена")
+    reason = ("Randewoo: добавьте разрешённую прямую ссылку или ручное подтверждение; /search отключён"
+              if source == "randewoo" else "Точная карточка не найдена")
+    return review or failure or observation(product, source, "no_card", reason=reason)
 
 
 def cache_key(product, source):
@@ -334,12 +455,14 @@ def main():
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--confirmations")
+    parser.add_argument("--review-output", type=Path, help="Отдельная очередь карточек на ручную проверку")
     parser.add_argument("--link-cache", type=Path, default=Path("local_data/competitor-links.json"),
                         help="Локальный JSON-кэш подтверждённых ссылок (без цен)")
     parser.add_argument("--browser-executable", type=Path)
     parser.add_argument("--no-search", action="store_true", help="Проверять только сохранённые ссылки")
+    parser.add_argument("--http-only", action="store_true", help="Проверять сохранённые ссылки без Chromium")
     args = parser.parse_args()
-    paths = [Path(path).resolve() for path in (args.catalog, args.output, args.confirmations, args.link_cache) if path]
+    paths = [Path(path).resolve() for path in (args.catalog, args.output, args.confirmations, args.link_cache, args.review_output) if path]
     if len(set(paths)) != len(paths):
         parser.error("Каталог, результат, ручные подтверждения и кэш должны быть разными файлами")
 
@@ -350,13 +473,13 @@ def main():
         parser.error("Некорректный кэш ссылок")
     seeds = seed_links()
     initial = links.copy()
-    access = PublicAccess(verified_transport=True)
+    access = CompetitorAccess(verified_transport=True)
     browser = None
     browser_error = None
     with ExitStack() as stack:
         stack.callback(access.session.close)
 
-        def search(source, product):
+        def chromium():
             nonlocal browser, browser_error
             if browser is None and browser_error is None:
                 try:
@@ -368,17 +491,32 @@ def main():
                     browser_error = AccessError("unavailable", "Установите Chromium: python -m playwright install chromium")
             if browser_error:
                 raise browser_error
-            return search_links(browser, access, source, product)
+            return browser
 
-        rows = []
+        def search(source, product):
+            return search_links(chromium(), access, source, product)
+
+        def render(product, source, url):
+            return rendered_card(chromium(), access, product, source, url)
+
+        jobs = {}
         for product, urls in targets(args.catalog):
             for source in STORES:
                 key = cache_key(product, source)
-                rows.append(collect(product, source, urls.get(source) or seeds.get(key), access,
-                                    policies.get(source, {}).get("access_policy"), saved_url=links.get(key),
-                                    search=None if args.no_search else search,
-                                    remember=lambda url: links.__setitem__(key, url)))
+                supplied = urls.get(source)
+                if key not in jobs or (supplied and not jobs[key][2]):
+                    jobs[key] = (product, source, supplied)
+        rows = [
+            collect(product, source, supplied or seeds.get(key), access,
+                    policies.get(source, {}).get("access_policy"), saved_url=links.get(key),
+                    search=None if args.no_search or args.http_only else search,
+                    remember=lambda url: links.__setitem__(key, url),
+                    render=None if args.http_only else render)
+            for key, (product, source, supplied) in jobs.items()
+        ]
     save(args.output, "competitors", rows + manual)
+    if args.review_output:
+        save(args.review_output, "competitors", [row for row in rows if row["status"] != "confirmed"])
     if links != initial:
         write_cache(args.link_cache, links)
 
