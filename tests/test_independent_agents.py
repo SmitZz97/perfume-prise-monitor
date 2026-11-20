@@ -30,7 +30,7 @@ def test_competitor_checks_robots_before_each_redirect():
         html = '<script type="application/ld+json">' + json.dumps(document) + '</script>'
         return SimpleNamespace(status_code=200, headers={"Content-Type": "text/html"}, text=html)
 
-    access = SimpleNamespace(policy=lambda url: calls.append(("robots", url)), request=request)
+    access = SimpleNamespace(policy=lambda url: calls.append(("robots", url)), request=request, blocked={})
     row = competitors.collect(PRODUCT, "goldapple", PUBLIC, access, "guarded_public")
     assert row["status"] == "confirmed"
     assert exchange.number(row["price_rub"]) == 2000
@@ -107,7 +107,8 @@ def test_all_three_cli_commands_produce_excel(tmp_path):
     ]:
         manual = tmp_path / f"{agent}-manual.json"
         exchange.save(manual, agent, [row])
-        cli(agent, "--catalog", catalog, "--output", path, "--confirmations", manual)
+        cli(agent, "--catalog", catalog, "--output", path, "--confirmations", manual,
+            *(["--no-search", "--link-cache", tmp_path / "links.json"] if agent == "competitors" else []))
     cli("pricing", "--competitors", retail, "--supplier", wholesale, "--output", report,
         "--shipping", 100, "--other", 50, "--commission-pct", 10, "--tax-pct", 5)
     with report.open("rb") as stream:
