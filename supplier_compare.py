@@ -141,6 +141,26 @@ def explicit_volume_unit(card):
     return ''
 
 
+def read_offer_rows(page, url):
+    result = []
+    cards=page.locator('[class*="product-detail-table__info"]')
+    for i in range(cards.count()):
+        card=cards.nth(i);scope=offer_scope(card)
+        def part(selector):
+            el=scope.locator(selector)
+            return el.first.inner_text(timeout=5000).strip() if el.count() else ''
+        price,price_reason=row_price_details(card)
+        result.append({'supplier':part('[class*="product-detail-table__supplier"]'),
+            'title':part('[class*="product-detail-table__title"]'),
+            'brand':part('[class*="product-detail-table__brand"]'),
+            'volume_unit':explicit_volume_unit(card),
+            'volume':part('[class*="product-detail-table__volume"]'),
+            'availability':part('[class*="product-detail-table__availability"], [data-testid="offer-availability"]'),
+            "package":part('[class*="product-detail-table__package"], [data-testid="offer-package"]'),
+            'price':price,'price_reason':price_reason,'url':url})
+    return result
+
+
 def read_live(url):
     profile = ROOT/'supplier_browser_profile'
     result=[]
@@ -151,19 +171,7 @@ def read_live(url):
             page.goto(url,wait_until='domcontentloaded',timeout=60000)
             page.get_by_text('Товар у поставщиков').first.wait_for(timeout=20000)
             page.wait_for_timeout(1800)
-            cards=page.locator('[class*="product-detail-table__info"]')
-            for i in range(cards.count()):
-                card=cards.nth(i);scope=offer_scope(card)
-                def part(selector):
-                    el=scope.locator(selector)
-                    return el.first.inner_text(timeout=5000).strip() if el.count() else ''
-                price,price_reason=row_price_details(card)
-                result.append({'supplier':part('[class*="product-detail-table__supplier"]'),
-                    'title':part('[class*="product-detail-table__title"]'),
-                    'brand':part('[class*="product-detail-table__brand"]'),
-                    'volume_unit':explicit_volume_unit(card),
-                    'volume':part('[class*="product-detail-table__volume"]'),
-                    'price':price,'price_reason':price_reason,'url':url})
+            result = read_offer_rows(page, url)
         finally: context.close()
     return result
 

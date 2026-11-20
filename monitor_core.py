@@ -93,7 +93,10 @@ def extract_card(html,url,store,name,volume):
         if not concentration(title+' '+detail):detail+=' '+str(obj.get('description',''))
         match,conc,vol=identity(title,brand,detail,name,volume)
         r=result(store,name,volume,url=url,label=title,found=True,identity_verified=match,concentration_verified=conc,volume_verified=vol)
-        r.update(product_brand=brand,product_name=title,matched_concentration=concentration(title+' '+detail))
+        packaging = {norm(x.get('value', '')) for x in props if isinstance(x, dict)
+                     and norm(x.get('name', '')) in ('комплектация', 'упаковка', 'packaging', 'package')}
+        r.update(product_brand=brand, product_name=title, matched_concentration=concentration(title+' '+detail),
+                 retail_packaging=bool(packaging) and packaging <= {'retail', 'retail box', 'флакон в коробке', 'фирменная упаковка'})
         if not (match and conc and vol) or not plain_product(title+' '+detail):
             r['reason']='Не подтверждено точное название/концентрация/объём или другая комплектация';rows.append(r);continue
         offers=obj.get('offers',[]);offers=offers if isinstance(offers,list) else [offers]

@@ -1,0 +1,14 @@
+{
+  "products": [
+    {
+      "product": {
+        "brand": "Synthetic Brand",
+        "name": "Example Fragrance",
+        "concentration": "EDP",
+        "volume_ml": "100",
+        "package": "retail"
+      },
+      "urls": {}
+    }
+  ]
+}

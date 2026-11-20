@@ -13,10 +13,10 @@ def amount(value):
     return money(value)
 
 
-def calculate(purchase, shipping=0, other=0, commission_pct=0, tax_pct=0, undercut=100, markup_pct=15, competitor_min=None):
+def calculate(purchase, shipping=0, other=0, commission_pct=0, tax_pct=0, undercut=100, markup_pct=15, competitor_min=None, *, minimum_markup=15):
     values=[Decimal(str(x)) for x in (purchase,shipping,other,commission_pct,tax_pct,undercut,markup_pct)]
-    if any(not x.is_finite() or x<0 for x in values) or values[0]<=0 or values[3]+values[4]>=100 or values[6]<15:
-        raise ValueError('Закупка должна быть положительной, наценка не меньше 15%, расходы конечными и неотрицательными, комиссия + налог <100%')
+    if any(not x.is_finite() or x<0 for x in values) or values[0]<=0 or values[3]+values[4]>=100 or values[6]<minimum_markup:
+        raise ValueError(f'Закупка должна быть положительной, наценка не меньше {minimum_markup}%, расходы конечными и неотрицательными, комиссия + налог <100%')
     buy,ship,extra,commission,tax,cut,markup=values
     fees=(commission+tax)/100
     floor=((buy*(1+markup/100)+ship+extra)/(1-fees)).to_integral_value(rounding=ROUND_CEILING)
