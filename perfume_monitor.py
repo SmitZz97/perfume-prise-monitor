@@ -74,6 +74,8 @@ class App:
         batch_bar.pack(fill='x',pady=(0,8))
         self.batch_button=ttk.Button(batch_bar,text='МАССОВЫЙ МОНИТОРИНГ ИЗ EXCEL',command=self.start_batch)
         self.batch_button.pack(side='left')
+        self.agents_button=ttk.Button(batch_bar,text='ЗАПУСТИТЬ 3 АГЕНТА',command=self.start_three_agents)
+        self.agents_button.pack(side='left',padx=8)
         ttk.Button(batch_bar,text='Подтвердить цены',command=self.confirm_prices).pack(side='left',padx=8)
         self.manual_only=tk.BooleanVar(value=False)
         ttk.Checkbutton(batch_bar,text='Без автосбора конкурентов (для массового запуска)',variable=self.manual_only).pack(side='left')
@@ -275,6 +277,41 @@ class App:
         self.log('МАССОВЫЙ МОНИТОРИНГ: '+path)
         self.log('Итоговый файл: '+str(report))
         threading.Thread(target=self.batch_worker,args=(cmd,),daemon=True).start()
+
+    def start_three_agents(self):
+        """Run the isolated workers without changing the previous batch workflow."""
+        path=filedialog.askopenfilename(title='Выберите список ароматов Excel',filetypes=[('Excel','*.xlsx')])
+        if not path:return
+        try:
+            values={k:float(e.get().strip().replace(',','.')) for k,e in self.expense_inputs.items()}
+            if any(not __import__('math').isfinite(v) or v<0 for v in values.values()) or values['commission']+values['tax']>=100:
+                raise ValueError()
+        except ValueError:
+            messagebox.showerror('Расходы','Проверьте доставку, прочие расходы, комиссии и налоги.')
+            return
+        stamp=datetime.now().strftime('%Y%m%d_%H%M%S')
+        report=ROOT/('recommendations_'+stamp+'.xlsx')
+        cmd=[sys.executable,'-u',str(ROOT/'run_three_agents.py'),'--input',path,
+             '--output',str(report),'--workdir',str(ROOT/'work'/stamp),
+             '--shipping',str(values['shipping']),'--other',str(values['other']),
+             '--commission-pct',str(values['commission']),'--tax-pct',str(values['tax']),
+             '--undercut',str(values['undercut'])]
+        if self.manual_only.get():cmd.append('--offline')
+        self.agents_button.config(state='disabled')
+        self.log('ТРИ НЕЗАВИСИМЫХ АГЕНТА: '+path)
+        self.log('Цены Delice Opt — только из текущих карточек. Если профиль удалён, сначала запустите supplier_login.py.')
+        threading.Thread(target=self.three_agents_worker,args=(cmd,report),daemon=True).start()
+
+    def three_agents_worker(self,cmd,report):
+        try:
+            proc=subprocess.Popen(cmd,cwd=str(ROOT),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                text=True,encoding='utf-8',errors='replace',bufsize=1,
+                env={**os.environ,'PYTHONIOENCODING':'utf-8','PYTHONUTF8':'1'})
+            for line in proc.stdout:self.log(line.rstrip())
+            code=proc.wait()
+            self.log('ГОТОВО: '+str(report) if code==0 and report.exists() else 'Запуск остановлен с ошибкой. Проверьте журнал выше.')
+        except Exception as exc:self.log('Ошибка запуска трёх агентов: '+str(exc))
+        finally:self.root.after(0,lambda:self.agents_button.config(state='normal'))
 
     def batch_worker(self,cmd):
         try:
