@@ -1,0 +1,18 @@
+{
+  "goldapple": {
+    "access_policy": "guarded_public",
+    "note": "Публичный HTML после robots.txt. При запрете/защите остановка; изменение политики на prohibited отключает запросы."
+  },
+  "letu": {
+    "access_policy": "guarded_public",
+    "note": "Публичный HTML после robots.txt. При запрете/защите остановка; изменение политики на prohibited отключает запросы."
+  },
+  "randewoo": {
+    "access_policy": "guarded_public",
+    "note": "Публичный HTML после robots.txt. При запрете/защите остановка; изменение политики на prohibited отключает запросы."
+  },
+  "rivegauche": {
+    "access_policy": "guarded_public",
+    "note": "Публичный HTML после robots.txt. При запрете/защите остановка; изменение политики на prohibited отключает запросы."
+  }
+}

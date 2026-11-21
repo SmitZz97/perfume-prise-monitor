@@ -1,0 +1,37 @@
+# Local credentials, browser sessions and supplier registry
+.env
+.env.*
+*.pem
+*.key
+*cookie*
+*token*
+*secret*
+*storage_state*
+*auth_state*
+supplier_browser_profile/
+**/supplier_browser_profile/
+**/browser_profile/
+**/profiles/
+supplier_links.json
+products.csv
+# Environments and generated reports
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+batch_details/
+batch_details_*/
+evidence/
+*.xlsx
+monitoring*.json
+candidates_*.csv
+
+# Private hybrid registry and manual prices: never publish or overwrite on update
+local_data/
+*.sqlite3
+*.sqlite3-*
+*.sqlite
+*.db
+work/

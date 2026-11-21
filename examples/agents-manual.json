@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "agent": "competitors",
+  "observations": [
+    {
+      "product": {
+        "brand": "Synthetic Brand",
+        "name": "Example Fragrance",
+        "concentration": "EDP",
+        "volume_ml": "100",
+        "package": "retail"
+      },
+      "source": "goldapple",
+      "status": "confirmed",
+      "url": "https://goldapple.ru/synthetic-example",
+      "price_rub": "2000.00",
+      "availability": "in_stock",
+      "checked_at": "2000-01-01T12:00:00+03:00",
+      "variant": "100 мл, обычный флакон",
+      "evidence": "manual",
+      "reason": "Синтетический пример формата"
+    }
+  ]
+}
