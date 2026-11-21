@@ -213,7 +213,7 @@ def rendered_card(browser, access, product, source, url, diagnostics=None):
             return result
         except Error as exc:
             if not navigation_timeout:
-                failure = type(exc).__name__ + ": " + str(exc)[:160]
+                failure = type(exc).__name__ + ": ошибка Chromium при проверке карточки"
             try:
                 check()
             except Error:
@@ -576,6 +576,7 @@ def main():
         write_cache(args.diagnostics, {
             "version": 1, "agent": "competitors",
             "rendered_cards": diagnostics,
+            "service_workers": access.service_workers,
             "browser_resources_skipped": competitor_diagnostics.resource_summary(access.events),
         })
         print(f"Диагностика записана: {args.diagnostics}")

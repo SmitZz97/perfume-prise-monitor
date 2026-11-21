@@ -200,7 +200,7 @@ def test_large_catalog_writes_review_queue_without_duplicate_products(tmp_path, 
     competitors.main()
     assert len(load(output)["observations"]) == 520
     assert load(review) == load(output)
-    assert load(diagnostics) == {"version": 1, "agent": "competitors", "rendered_cards": [],
+    assert load(diagnostics) == {"version": 1, "agent": "competitors", "rendered_cards": [], "service_workers": "block",
                                  "browser_resources_skipped": []}
 
 
@@ -353,3 +353,42 @@ def test_public_get_hydrates_card_but_post_is_not_sent(browser, monkeypatch):
     assert quote is not None and quote[0] == 7300 and exact
     assert checked == fetched == [URL, "https://www.letu.ru/fixture-public-product"]
     assert any(event.get("method") == "POST" and "skipped" in event for event in access.events)
+
+
+def test_guarded_context_blocks_service_worker_registration(browser, monkeypatch):
+    # Serve only a synthetic document and a public GET through the actual route handler.
+    from json import dumps
+
+    html = """
+      <main></main><script>
+        navigator.serviceWorker.register('/worker.js').catch(() => {});
+        fetch('/fixture-data').then(response => response.json()).then(data => {
+          document.querySelector('main').textContent = data.title;
+        });
+      </script>
+    """
+    access = competitors.CompetitorAccess(verified_transport=True)
+    checked = []
+
+    def request(url):
+        if url == URL:
+            content, media = html, "text/html; charset=utf-8"
+        else:
+            assert url.endswith("/fixture-data")
+            content, media = dumps({"title": "Public card"}), "application/json"
+        return SimpleNamespace(status_code=200, content=content.encode(), headers={"Content-Type": media})
+
+    monkeypatch.setattr(access, "policy", checked.append)
+    monkeypatch.setattr(access, "request", request)
+    with access.session:
+        context, errors = access.context(browser, "letu.ru")
+        try:
+            page = context.new_page()
+            page.goto(URL)
+            page.get_by_text("Public card", exact=True).wait_for()
+            assert page.evaluate("navigator.serviceWorker.getRegistrations().then(items => items.length)") == 0
+            assert not context.service_workers
+            assert not errors
+        finally:
+            context.close()
+    assert checked == [URL, "https://www.letu.ru/fixture-data"]

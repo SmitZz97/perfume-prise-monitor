@@ -85,7 +85,14 @@ def resource_summary(events):
     for event in events:
         if "skipped" not in event:
             continue
-        host = urlsplit(event.get("url", "")).hostname or "unknown"
-        skipped[(event.get("method", "unknown"), event.get("resource_type", "unknown"), host)] += 1
-    return [{"method": method, "type": kind, "host": host, "count": count}
-            for (method, kind, host), count in skipped.most_common(25)]
+        host = event.get("host") or urlsplit(event.get("url", "")).hostname or "unknown"
+        # Legacy event fixtures had no structured reason.
+        reason = event["skipped"] if "host" in event else None
+        skipped[(event.get("method", "unknown"), event.get("resource_type", "unknown"), host, reason)] += 1
+    summaries = []
+    for (method, kind, host, reason), count in skipped.most_common(25):
+        summary = {"method": method, "type": kind, "host": host, "count": count}
+        if reason:
+            summary["reason"] = reason
+        summaries.append(summary)
+    return summaries
