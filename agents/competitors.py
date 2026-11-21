@@ -518,8 +518,10 @@ def main():
             return search_links(chromium(), access, source, product)
 
         def render(product, source, url):
-            return rendered_card(chromium(), access, product, source, url,
-                                 diagnostics=diagnostics if args.diagnostics else None)
+            args_for_card = (chromium(), access, product, source, url)
+            if args.diagnostics:
+                return rendered_card(*args_for_card, diagnostics=diagnostics)
+            return rendered_card(*args_for_card)
 
         jobs = {}
         for product, urls in targets(args.catalog):

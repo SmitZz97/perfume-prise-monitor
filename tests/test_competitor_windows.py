@@ -159,19 +159,26 @@ def test_letu_visible_marketplace_prices_are_diagnostic_not_confirmed(browser):
     url = "https://www.letu.ru/product/creed-green-irish-tweed/170100853/sku/190700489"
     html = """<main><article data-testid="product-card">
       <h1>CREED Парфюмерная вода Green Irish Tweed, 100</h1>
+      <span itemprop="brand">Creed</span><span itemprop="packaging">Флакон в коробке</span>
       <div data-testid="volume-group"><button aria-pressed="true">100 мл</button></div>
       <div>Цена для новых клиентов</div><div>65 910 ₽</div>
-      <strong>67 948 ₽</strong><s>79 939 ₽</s>
-      <button>В корзину</button><div>Продавец</div><div>БОРДЕРЛЕСС ПОРТАЛ КО ЛЛС</div>
+      <strong itemprop="price">67 948 ₽</strong><s>79 939 ₽</s>
+      <button>В корзину</button><div>Продавец</div><div itemprop="seller">БОРДЕРЛЕСС ПОРТАЛ КО ЛЛС</div>
       </article></main>"""
     access = FixtureAccess({url: html, "letu.ru": html})
     diagnostics = []
     quote, exact, variant, detail = competitors.rendered_card(
         browser, access, product, "letu", url, diagnostics=diagnostics,
     )
-    assert quote is None
+    assert quote is None and exact
+    assert "Продавец магазина" in detail
     assert diagnostics[0]["headings"] == ["CREED Парфюмерная вода Green Irish Tweed, 100"]
-    assert "67 948 ₽" in diagnostics[0]["price_lines"]
+    assert diagnostics[0]["price_lines"] == ["65 910 ₽", "67 948 ₽", "79 939 ₽"]
+    assert diagnostics[0]["visible_prices"] == [
+        {"text": "65 910 ₽", "kind": "special"},
+        {"text": "67 948 ₽", "kind": "regular"},
+        {"text": "79 939 ₽", "kind": "crossed_out"},
+    ]
     assert "БОРДЕРЛЕСС ПОРТАЛ КО ЛЛС" in diagnostics[0]["seller_lines"]
     assert resource_summary([{"url": "https://assets.example/style.css", "method": "GET",
                               "resource_type": "stylesheet", "skipped": "untrusted"}]) == [
