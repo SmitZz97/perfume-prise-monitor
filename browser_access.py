@@ -12,10 +12,16 @@ class AccessError(RuntimeError):
     def __init__(self,status,reason):self.status=status;super().__init__(reason)
 
 def protection(text):
-    visible=BeautifulSoup(text,'html.parser').get_text(' ',strip=True).casefold()
+    soup = BeautifulSoup(text, 'html.parser')
+    title = " ".join(soup.title.get_text(" ", strip=True).casefold().split()) if soup.title else ""
+    if title in {"checking device", "checking your device"} or (
+        title.startswith("gold apple") and title.endswith(("checking device", "checking your device"))
+    ):
+        return "Защита сайта: проверка устройства"
+    visible = soup.get_text(' ', strip=True).casefold()
     if '__jhash_' in text and '__js_p_' in text:return 'JavaScript cookie challenge'
     if any(x in visible for x in ('доступ к сайту временно ограничен','проверка вашего браузера','access denied','verify you are human','just a moment')):return 'Защита сайта / проверка браузера'
-    if BeautifulSoup(text,'html.parser').select('iframe[src*="captcha"], .g-recaptcha, .h-captcha'):return 'CAPTCHA'
+    if soup.select('iframe[src*="captcha"], .g-recaptcha, .h-captcha'):return 'CAPTCHA'
     return ''
 
 class PublicAccess:

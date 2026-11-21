@@ -11,7 +11,7 @@ from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import Error, sync_playwright
+from playwright.sync_api import Error, TimeoutError as BrowserTimeout, sync_playwright
 
 from browser_access import AccessError, PublicAccess, protection
 from discover_perfumes import SEARCHES, is_product, search_goldapple
@@ -174,30 +174,57 @@ def rendered_card(browser, access, product, source, url, diagnostics=None):
     page = None
     failure = ""
     navigation_status = None
+    navigation_timeout = False
     try:
         context.route_web_socket("**/*", lambda socket: socket.close())
         page = context.new_page()
 
         def check():
-            competitor_dom.check_page(page, errors, lambda: blocked_store(access, source))
+            try:
+                competitor_dom.check_page(page, errors, lambda: blocked_store(access, source))
+            except AccessError as exc:
+                if exc.status == "blocked" and exc not in errors:
+                    access.blocked[access.origin(url)] = exc
+                raise
 
         try:
-            response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            navigation_status = response.status if response else None
+            try:
+                response = page.goto(url, wait_until="commit", timeout=20000)
+                navigation_status = response.status if response else None
+            except BrowserTimeout:
+                navigation_timeout = True
+                failure = "TimeoutError: Chromium не подтвердил завершение навигации"
             check()
+            if navigation_timeout and page.url != url:
+                return None, False, "", "Тайм-аут навигации: адрес запрошенной карточки не открылся"
             check_url(source, page.url)
+            if navigation_status is not None and navigation_status >= 400:
+                raise AccessError("unavailable", f"Карточка недоступна: HTTP {navigation_status}")
             if not current_offer_dates(page.content()):
                 return None, False, "", "Срок действия предложения истёк или указан некорректно"
             result = competitor_dom.offer(page, product, source, title_name=product_name,
                                           package_patterns=PACKAGE, cologne=COLOGNE, check=check)
+            check()
+            if navigation_timeout and not result[0]:
+                quote, exact, variant, reason = result
+                return quote, exact, variant, "Тайм-аут навигации: " + reason
             if result[0] and not current_offer_dates(page.content()):
                 return None, result[1], result[2], "Срок действия цены выбранного варианта истёк или указан некорректно"
             return result
         except Error as exc:
-            failure = type(exc).__name__ + ": " + str(exc)[:160]
-            if errors:
-                raise errors[0]
-            return None, False, "", "Chromium не дождался основного блока карточки или выбранного варианта"
+            if not navigation_timeout:
+                failure = type(exc).__name__ + ": " + str(exc)[:160]
+            try:
+                check()
+            except Error:
+                pass
+            except AccessError as restriction:
+                failure = restriction.status + ": " + str(restriction)[:160]
+                raise
+            reason = "Chromium не дождался основного блока карточки или выбранного варианта"
+            if navigation_timeout:
+                reason = "Тайм-аут навигации: основной блок карточки не подтвердился"
+            return None, False, "", reason
         except AccessError as exc:
             failure = exc.status + ": " + str(exc)[:160]
             raise
@@ -209,6 +236,8 @@ def rendered_card(browser, access, product, source, url, diagnostics=None):
             snapshot = competitor_diagnostics.page_snapshot(page, product, source)
             snapshot["error"] = failure
             snapshot["navigation_status"] = navigation_status
+            if navigation_timeout:
+                snapshot["navigation_timeout"] = True
             diagnostics.append(snapshot)
         context.close()
 

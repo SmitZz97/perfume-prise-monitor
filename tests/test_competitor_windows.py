@@ -254,3 +254,102 @@ def test_randewoo_rejects_search_redirect_without_request(monkeypatch):
     row = competitors.collect(LIBRE, "randewoo", url, access, "guarded_public")
     assert row["status"] == "blocked"
     assert requested == [("robots", url), ("GET", url)]
+
+
+def test_goldapple_device_check_blocks_http_200(browser):
+    from browser_access import protection
+
+    url = "https://goldapple.ru/26542200005-green-irish-tweed"
+    html = '<title>Gold Apple — checking device</title><body></body>'
+    assert "проверка устройства" in protection(html)
+    assert not protection('<title>Парфюм Gold Apple</title><p>review: checking device</p>')
+    access = FixtureAccess({url: html, "goldapple.ru": html})
+    access.origin = lambda _: "https://goldapple.ru"
+    diagnostics = []
+    row = competitors.collect(
+        LIBRE, "goldapple", url, access, "guarded_public",
+        render=lambda *args: competitors.rendered_card(browser, access, *args, diagnostics=diagnostics),
+    )
+    assert row["status"] == "blocked" and row["price_rub"] is None
+    assert "проверка устройства" in row["reason"]
+    assert "https://goldapple.ru" in access.blocked
+    assert diagnostics[0]["navigation_status"] == 200
+    assert diagnostics[0]["error"].startswith("blocked:")
+
+
+@pytest.mark.parametrize(("markup", "status", "reason"), [
+    ("complete", "confirmed", "Публичная цена"),
+    ("incomplete", "manual_review", "Продавец магазина"),
+    ("missing", "manual_review", "основной блок карточки не подтвердился"),
+])
+def test_navigation_timeout_checks_available_dom(browser, monkeypatch, markup, status, reason):
+    from playwright.sync_api import Page, TimeoutError as BrowserTimeout
+
+    complete = """
+      <article><h1>Libre EDP 90 мл</h1><span itemprop="brand">Yves Saint Laurent</span>
+      <span itemprop="packaging">Флакон в коробке</span>
+      <div><span itemprop="price">7 300 ₽</span></div>
+      <span itemprop="seller">Лэтуаль</span></article>
+    """
+    html = {
+        "complete": complete,
+        "incomplete": complete.replace('<span itemprop="seller">Лэтуаль</span>', ""),
+        "missing": "<main>Загрузка</main>",
+    }[markup]
+    access = FixtureAccess({URL: html, "letu.ru": html})
+    goto = Page.goto
+
+    def timeout_after_response(page, url, **kwargs):
+        assert kwargs["wait_until"] == "commit"
+        goto(page, url, **kwargs)
+        raise BrowserTimeout("synthetic navigation timeout after document commit")
+
+    monkeypatch.setattr(Page, "goto", timeout_after_response)
+    diagnostics = []
+    row = competitors.collect(
+        LIBRE, "letu", URL, access, "guarded_public",
+        render=lambda *args: competitors.rendered_card(browser, access, *args, diagnostics=diagnostics),
+    )
+    assert row["status"] == status
+    assert reason in row["reason"]
+    assert row["price_rub"] == ("7300.0" if status == "confirmed" else None)
+    assert diagnostics[0]["navigation_timeout"] is True
+    assert diagnostics[0]["navigation_status"] is None
+    assert diagnostics[0]["error"].startswith("TimeoutError:")
+
+
+def test_public_get_hydrates_card_but_post_is_not_sent(browser, monkeypatch):
+    markup = """
+      <article><h1>Libre EDP 90 мл</h1><span itemprop="brand">Yves Saint Laurent</span>
+      <span itemprop="packaging">Флакон в коробке</span>
+      <div><span itemprop="price">7 300 ₽</span></div>
+      <span itemprop="seller">Лэтуаль</span></article>
+    """
+    from json import dumps
+
+    html = """<main></main><script>
+      fetch('/fixture-post', {method: 'POST'}).catch(() => {});
+      fetch('/fixture-public-product').then(response => response.json()).then(card => {
+        document.querySelector('main').innerHTML = card.html;
+      });
+    </script>"""
+    access = competitors.CompetitorAccess(verified_transport=True)
+    checked = []
+    fetched = []
+
+    def request(url):
+        fetched.append(url)
+        if url == URL:
+            body, kind = html, "text/html; charset=utf-8"
+        else:
+            assert url.endswith("/fixture-public-product")
+            body, kind = dumps({"html": markup}), "application/json"
+        return SimpleNamespace(status_code=200, content=body.encode(), headers={"Content-Type": kind})
+
+    monkeypatch.setattr(access, "policy", checked.append)
+    monkeypatch.setattr(access, "request", request)
+    with access.session:
+        quote, exact, _, _ = competitors.rendered_card(browser, access, LIBRE, "letu", URL)
+    assert quote is not None and quote[0] == 7300 and exact
+    assert checked == fetched == [URL, "https://www.letu.ru/fixture-public-product"]
+    assert any(event.get("method") == "POST" and "skipped" in event for event in access.events)
