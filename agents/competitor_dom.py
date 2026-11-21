@@ -91,6 +91,10 @@ def offer(page, product, source, *, title_name, package_patterns, cologne, check
     if title_name(heading, product.brand) != normalized(product.name):
         return None, False, heading, "Название основного товара отличается"
     brands = value_set(scope, BRAND)
+    if not brands and normalized(heading).startswith(normalized(product.brand) + " "):
+        # L'Etoile sometimes puts the brand in the heading without a separate
+        # itemprop/data-testid. Do not infer a brand from unrelated page text.
+        brands = {normalized(product.brand)}
     if brands != {normalized(product.brand)}:
         return None, False, heading, "Бренд в основном блоке отсутствует или отличается"
     size = number(product.volume_ml)

@@ -17,7 +17,7 @@ from browser_access import AccessError, PublicAccess, protection
 from discover_perfumes import SEARCHES, is_product, search_goldapple
 from monitor_core import CONCENTRATIONS, concentrations, extract_card, norm, scent_name, volume_values
 
-from . import competitor_dom
+from . import competitor_dom, competitor_diagnostics
 from .exchange import Product, STORES, check_url, confirmations, load, normalized, number, observation, save, stock, targets
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,8 +169,11 @@ def catalogue_search(page, source, query, errors):
     return results.evaluate_all("els=>els.map(a=>({url:a.href,text:a.innerText||''}))")
 
 
-def rendered_card(browser, access, product, source, url):
+def rendered_card(browser, access, product, source, url, diagnostics=None):
     context, errors = access.context(browser, STORES[source], budget=55)
+    page = None
+    failure = ""
+    navigation_status = None
     try:
         context.route_web_socket("**/*", lambda socket: socket.close())
         page = context.new_page()
@@ -179,7 +182,8 @@ def rendered_card(browser, access, product, source, url):
             competitor_dom.check_page(page, errors, lambda: blocked_store(access, source))
 
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            navigation_status = response.status if response else None
             check()
             check_url(source, page.url)
             if not current_offer_dates(page.content()):
@@ -189,13 +193,23 @@ def rendered_card(browser, access, product, source, url):
             if result[0] and not current_offer_dates(page.content()):
                 return None, result[1], result[2], "Срок действия цены выбранного варианта истёк или указан некорректно"
             return result
-        except Error:
+        except Error as exc:
+            failure = type(exc).__name__ + ": " + str(exc)[:160]
             if errors:
                 raise errors[0]
             return None, False, "", "Chromium не дождался основного блока карточки или выбранного варианта"
+        except AccessError as exc:
+            failure = exc.status + ": " + str(exc)[:160]
+            raise
         except ValueError:
+            failure = "InvalidProductURL"
             return None, False, "", "Карточка перенаправлена на другой домен или неподтверждённый URL"
     finally:
+        if diagnostics is not None:
+            snapshot = competitor_diagnostics.page_snapshot(page, product, source)
+            snapshot["error"] = failure
+            snapshot["navigation_status"] = navigation_status
+            diagnostics.append(snapshot)
         context.close()
 
 
@@ -219,6 +233,9 @@ def product_objects(html):
 
 
 def product_name(title, brand):
+    # Some merchants render a selected 100 ml SKU as "Name, 100" rather than
+    # "Name, 100 мл". The comma distinguishes this from names such as "212".
+    title = re.sub(r",\s*\d{1,4}(?:[.,]\d{1,2})?\s*$", "", title)
     title = re.sub(
         r"\b(?:женская|мужская|унисекс)\s+(?=(?:парфюмерная|парфюмированная|туалетная)\s+вода)",
         "", title, flags=re.I,
@@ -459,10 +476,13 @@ def main():
     parser.add_argument("--link-cache", type=Path, default=Path("local_data/competitor-links.json"),
                         help="Локальный JSON-кэш подтверждённых ссылок (без цен)")
     parser.add_argument("--browser-executable", type=Path)
+    parser.add_argument("--diagnostics", type=Path,
+                        help="Записать локальный отчёт о загрузке страниц и пропущенных ресурсах (без cookies/HTML)")
     parser.add_argument("--no-search", action="store_true", help="Проверять только сохранённые ссылки")
     parser.add_argument("--http-only", action="store_true", help="Проверять сохранённые ссылки без Chromium")
     args = parser.parse_args()
-    paths = [Path(path).resolve() for path in (args.catalog, args.output, args.confirmations, args.link_cache, args.review_output) if path]
+    paths = [Path(path).resolve() for path in (args.catalog, args.output, args.confirmations,
+             args.link_cache, args.review_output, args.diagnostics) if path]
     if len(set(paths)) != len(paths):
         parser.error("Каталог, результат, ручные подтверждения и кэш должны быть разными файлами")
 
@@ -474,6 +494,7 @@ def main():
     seeds = seed_links()
     initial = links.copy()
     access = CompetitorAccess(verified_transport=True)
+    diagnostics = []
     browser = None
     browser_error = None
     with ExitStack() as stack:
@@ -497,7 +518,8 @@ def main():
             return search_links(chromium(), access, source, product)
 
         def render(product, source, url):
-            return rendered_card(chromium(), access, product, source, url)
+            return rendered_card(chromium(), access, product, source, url,
+                                 diagnostics=diagnostics if args.diagnostics else None)
 
         jobs = {}
         for product, urls in targets(args.catalog):
@@ -519,6 +541,13 @@ def main():
         save(args.review_output, "competitors", [row for row in rows if row["status"] != "confirmed"])
     if links != initial:
         write_cache(args.link_cache, links)
+    if args.diagnostics:
+        write_cache(args.diagnostics, {
+            "version": 1, "agent": "competitors",
+            "rendered_cards": diagnostics,
+            "browser_resources_skipped": competitor_diagnostics.resource_summary(access.events),
+        })
+        print(f"Диагностика записана: {args.diagnostics}")
 
 
 if __name__ == "__main__":

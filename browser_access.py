@@ -74,7 +74,8 @@ class PublicAccess:
         if delay>30:raise AccessError('unavailable','robots.txt требует длительную паузу; запрос отложен')
         time.sleep(max(0,self.last.get(origin,0)+delay-time.monotonic()))
     def _record_route(self,request,**updates):
-        event={'url':request.url,'resource_type':getattr(request,'resource_type','unknown'),**updates}
+        event={'url':request.url,'method':getattr(request,'method','unknown'),
+               'resource_type':getattr(request,'resource_type','unknown'),**updates}
         self.events.append(event)
         if self.folder:(self.folder/'requests.json').write_text(json.dumps(self.events,ensure_ascii=False,indent=2),encoding='utf-8')
 

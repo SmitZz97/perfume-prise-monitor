@@ -148,6 +148,34 @@ def test_store_title_descriptors_do_not_change_edition():
     assert competitors.product_name("Женская парфюмерная вода Libre, 90 мл", LIBRE.brand) == "libre"
     assert competitors.product_name("YSL Libre EDP 90 мл", LIBRE.brand) == "libre"
     assert competitors.product_name("Libre Intense EDP 90 мл", LIBRE.brand) == "libre intense"
+    assert competitors.product_name("CREED Парфюмерная вода Green Irish Tweed, 100", "Creed") == "green irish tweed"
+    assert competitors.product_name("Carolina Herrera 212", "Carolina Herrera") == "212"
+
+
+def test_letu_visible_marketplace_prices_are_diagnostic_not_confirmed(browser):
+    from agents.competitor_diagnostics import resource_summary
+
+    product = Product("Creed", "Green Irish Tweed", "EDP", "100", "retail")
+    url = "https://www.letu.ru/product/creed-green-irish-tweed/170100853/sku/190700489"
+    html = """<main><article data-testid="product-card">
+      <h1>CREED Парфюмерная вода Green Irish Tweed, 100</h1>
+      <div data-testid="volume-group"><button aria-pressed="true">100 мл</button></div>
+      <div>Цена для новых клиентов</div><div>65 910 ₽</div>
+      <strong>67 948 ₽</strong><s>79 939 ₽</s>
+      <button>В корзину</button><div>Продавец</div><div>БОРДЕРЛЕСС ПОРТАЛ КО ЛЛС</div>
+      </article></main>"""
+    access = FixtureAccess({url: html, "letu.ru": html})
+    diagnostics = []
+    quote, exact, variant, detail = competitors.rendered_card(
+        browser, access, product, "letu", url, diagnostics=diagnostics,
+    )
+    assert quote is None
+    assert diagnostics[0]["headings"] == ["CREED Парфюмерная вода Green Irish Tweed, 100"]
+    assert "67 948 ₽" in diagnostics[0]["price_lines"]
+    assert "БОРДЕРЛЕСС ПОРТАЛ КО ЛЛС" in diagnostics[0]["seller_lines"]
+    assert resource_summary([{"url": "https://assets.example/style.css", "method": "GET",
+                              "resource_type": "stylesheet", "skipped": "untrusted"}]) == [
+        {"method": "GET", "type": "stylesheet", "host": "assets.example", "count": 1}]
 
 
 def test_large_catalog_writes_review_queue_without_duplicate_products(tmp_path, monkeypatch):
@@ -157,12 +185,16 @@ def test_large_catalog_writes_review_queue_without_duplicate_products(tmp_path, 
     products = [Product("Example", f"Aroma {index}", "EDP", "100", "retail") for index in range(130)]
     catalog = tmp_path / "catalog.json"
     catalog.write_text(json.dumps({"products": [{"product": product.__dict__} for product in products + products]}))
-    output, review, cache = [tmp_path / filename for filename in ("out.json", "review.json", "cache.json")]
+    output, review, cache, diagnostics = [tmp_path / filename for filename in
+                                          ("out.json", "review.json", "cache.json", "diagnostics.json")]
     monkeypatch.setattr("sys.argv", ["competitors", "--catalog", str(catalog), "--output", str(output),
-                                    "--review-output", str(review), "--link-cache", str(cache), "--http-only"])
+                                    "--review-output", str(review), "--link-cache", str(cache),
+                                    "--diagnostics", str(diagnostics), "--http-only"])
     competitors.main()
     assert len(load(output)["observations"]) == 520
     assert load(review) == load(output)
+    assert load(diagnostics) == {"version": 1, "agent": "competitors", "rendered_cards": [],
+                                 "browser_resources_skipped": []}
 
 
 def test_published_sku_link_confirms_price_in_new_document(browser):
